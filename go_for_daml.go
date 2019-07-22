@@ -263,7 +263,7 @@ func submitAndGetContractID(
 	response, err := commandClient.SubmitAndWaitForTransaction(ctx, request)
 
 	if err != nil {
-		log.Fatal("Error: v%", err)
+		log.Fatal("Error: %v", err)
 	}
 
 	return getContractID(response.GetTransaction()), err
