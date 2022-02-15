@@ -1,0 +1,44 @@
+module Main where
+
+template Asset
+  with
+    issuer : Party
+    owner  : Party
+    name   : Text
+  where
+    key (issuer, name) : (Party, Text)
+    maintainer key._1
+    ensure name /= ""
+    signatory issuer
+    observer owner
+    choice Give : ContractId Asset
+      with
+        newOwner : Party
+      controller owner
+      do create this with
+           owner = newOwner
+    nonconsuming choice CallOut : ()
+      with 
+        message : Text
+      observer issuer
+      controller owner 
+      do 
+        return ()
+    nonconsuming choice CallBack : ContractId Message
+      with 
+        message : Text
+      controller issuer
+      do 
+        create Message with 
+          writer = issuer 
+          recipient = owner 
+          .. 
+
+template Message 
+  with 
+    writer : Party
+    recipient : Party 
+    message : Text 
+  where 
+    signatory writer
+      

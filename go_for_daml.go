@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -9,22 +10,20 @@ import (
 	"strings"
 	"time"
 
-	pb "go_daml/com/digitalasset/ledger/api/v1"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 
+	"github.com/google/uuid"
+	pb "github.com/gyorgybalazsi/go_daml/com/daml/ledger/api/v1"
 	grpc "google.golang.org/grpc"
-
-	protobuf "google/protobuf"
-)
-
-const (
-	address = "localhost:7600"
-	//Package ID needs to be updated when DAML template set changes
+	emptypb "google.golang.org/protobuf/types/known/emptypb"
 )
 
 //HELPER FUNCTIONS
 
 //Unit to be used as nil value in variants
-var unit = &pb.Value{Sum: &pb.Value_Unit{Unit: &protobuf.Empty{}}}
+var unit = &pb.Value{Sum: &pb.Value_Unit{Unit: &emptypb.Empty{}}}
 
 //Empty record to be used as nil value on commands without input
 var emptyRecord = &pb.Value{Sum: &pb.Value_Record{Record: &pb.Record{}}}
@@ -38,8 +37,30 @@ func singleFieldRecord(label string, value *pb.Value) *pb.Record {
 
 //Functions to build value object from record, int, text, party, variant
 
-func recordValue(label string, value *pb.Value) *pb.Value {
+func singleFieldRecordValue(label string, value *pb.Value) *pb.Value {
 	return &pb.Value{Sum: &pb.Value_Record{Record: singleFieldRecord(label, value)}}
+}
+
+func recordValue(recordMap map[string]*pb.Value) *pb.Value {
+	fields := []*pb.RecordField{}
+	for k, v := range recordMap {
+		fields = append(fields, &pb.RecordField{
+			Label: k,
+			Value: v,
+		})
+	}
+	record := &pb.Record{
+		Fields: fields,
+	}
+	return &pb.Value{Sum: &pb.Value_Record{Record: record}}
+
+}
+
+func createDouble(left *pb.Value, right *pb.Value) *pb.Value {
+	m := make(map[string]*pb.Value)
+	m["_1"] = left
+	m["_2"] = right
+	return recordValue(m)
 }
 
 //func printRecordValue
@@ -83,25 +104,39 @@ func printPartyValue(value *pb.Value) string {
 	return value.GetParty()
 }
 
+func optionalSomeTextValue(value string) *pb.Value {
+	return &pb.Value{
+		Sum: &pb.Value_Optional{
+			Optional: &pb.Optional{
+				Value: textValue(value),
+			},
+		},
+	}
+}
+
 //Input builders, to be used as ChoiceArgument value input
 
 //Integer input builder
 func integerInput(label string, value int64) *pb.Value {
-	return recordValue(label, intValue(value))
+	return singleFieldRecordValue(label, intValue(value))
 }
 
 //Text input builder
 func textInput(label string, value string) *pb.Value {
-	return recordValue(label, textValue(value))
+	return singleFieldRecordValue(label, textValue(value))
 }
 
 //Variant input builder
 func variantInput(label string, value string) *pb.Value {
-	return recordValue(label, variantValue(value))
+	return singleFieldRecordValue(label, variantValue(value))
 }
 
 func partyInput(label string, value string) *pb.Value {
-	return recordValue(label, partyValue(value))
+	return singleFieldRecordValue(label, partyValue(value))
+}
+
+func optinalSomeTextInput(label string, value string) *pb.Value {
+	return singleFieldRecordValue(label, optionalSomeTextValue(value))
 }
 
 //Function gets ledger id
@@ -171,7 +206,7 @@ func submitAndGetResponse(
 	moduleName string,
 	templateName string,
 	choice string,
-	input *pb.Value, //integerInput | variantInput | partyInput
+	input *pb.Value, //integerInput | textInput | variantInput | partyInput
 	submittingParty string,
 	applicationID string,
 	commandID string,
@@ -192,14 +227,14 @@ func submitAndGetResponse(
 	}
 
 	commands := &pb.Commands{
-		LedgerId:            ledgerID,
-		WorkflowId:          workflowID,
-		ApplicationId:       applicationID,
-		CommandId:           commandID,
-		Party:               submittingParty,
-		LedgerEffectiveTime: &protobuf.Timestamp{Seconds: (timeHopInSeconds + 1)},
-		MaximumRecordTime:   &protobuf.Timestamp{Seconds: (timeHopInSeconds + 10)},
-		Commands:            []*pb.Command{command},
+		LedgerId:      ledgerID,
+		WorkflowId:    workflowID,
+		ApplicationId: applicationID,
+		CommandId:     commandID,
+		Party:         submittingParty,
+		//LedgerEffectiveTime: &timestamppb.Timestamp{Seconds: (timeHopInSeconds + 1)},
+		//MaximumRecordTime:   &timestamppb.Timestamp{Seconds: (timeHopInSeconds + 10)},
+		Commands: []*pb.Command{command},
 	}
 
 	request := &pb.SubmitAndWaitRequest{
@@ -246,14 +281,66 @@ func submitAndGetContractID(
 	}
 
 	commands := &pb.Commands{
-		LedgerId:            ledgerID,
-		WorkflowId:          workflowID,
-		ApplicationId:       applicationID,
-		CommandId:           commandID,
-		Party:               submittingParty,
-		LedgerEffectiveTime: &protobuf.Timestamp{Seconds: (timeHopInSeconds + 1)},
-		MaximumRecordTime:   &protobuf.Timestamp{Seconds: (timeHopInSeconds + 10)},
-		Commands:            []*pb.Command{command},
+		LedgerId:      ledgerID,
+		WorkflowId:    workflowID,
+		ApplicationId: applicationID,
+		CommandId:     commandID,
+		Party:         submittingParty,
+		//LedgerEffectiveTime: &timestamppb.Timestamp{Seconds: (timeHopInSeconds + 1)},
+		//MaximumRecordTime:   &timestamppb.Timestamp{Seconds: (timeHopInSeconds + 10)},
+		Commands: []*pb.Command{command},
+	}
+
+	request := &pb.SubmitAndWaitRequest{
+		Commands: commands,
+	}
+
+	response, err := commandClient.SubmitAndWaitForTransaction(ctx, request)
+
+	if err != nil {
+		log.Fatal("Error: %v", err)
+	}
+
+	return getContractID(response.GetTransaction()), err
+}
+
+func submitExerciseAndGetContractId2(
+	ctx context.Context,
+	commandClient pb.CommandServiceClient,
+	ledgerID string,
+	workflowID string,
+	packageID string,
+	moduleName string,
+	templateName string,
+	contractId string,
+	choice string,
+	input *pb.Value, //integerInput | variantInput | partyInput
+	submittingParty string,
+	applicationID string,
+	commandID string) (string, error) {
+	exerciseCommand := pb.ExerciseCommand{
+		TemplateId: &pb.Identifier{
+			PackageId:  packageID,
+			ModuleName: moduleName,
+			EntityName: templateName,
+		},
+		ContractId:     contractId,
+		Choice:         choice,
+		ChoiceArgument: input,
+	}
+	command := &pb.Command{
+		Command: &pb.Command_Exercise{Exercise: &exerciseCommand},
+	}
+
+	commands := &pb.Commands{
+		LedgerId:      ledgerID,
+		WorkflowId:    workflowID,
+		ApplicationId: applicationID,
+		CommandId:     commandID,
+		Party:         submittingParty,
+		//LedgerEffectiveTime: &timestamppb.Timestamp{Seconds: (timeHopInSeconds + 1)},
+		//MaximumRecordTime:   &timestamppb.Timestamp{Seconds: (timeHopInSeconds + 10)},
+		Commands: []*pb.Command{command},
 	}
 
 	request := &pb.SubmitAndWaitRequest{
@@ -296,7 +383,7 @@ func printTransaction(tx *pb.Transaction) {
 		"Workflow ID: " + tx.GetWorkflowId(),
 		"Witness parties: " + strings.Join(witnessParties, ","),
 		"Contract ID: " + contractID,
-		"Template ID: " + templateID.GetName() + "@" + templateID.GetPackageId(),
+		"Template ID: " + templateID.GetEntityName() + "@" + templateID.GetPackageId(),
 		"Offset: " + tx.GetOffset(),
 	}
 
@@ -350,26 +437,248 @@ func getContractID(tx *pb.Transaction) string {
 	return event.GetCreated().GetContractId()
 }
 
+func printTransactionTrees(ctx context.Context, cc *grpc.ClientConn, ledgerID string, party string) {
+	transactionServiceClient := pb.NewTransactionServiceClient(cc)
+	filterMap := map[string]*pb.Filters{party: &pb.Filters{}}
+	// TODO : make Begin a flag
+	in := &pb.GetTransactionsRequest{
+		LedgerId: ledgerID,
+		Begin:    &pb.LedgerOffset{Value: &pb.LedgerOffset_Boundary{Boundary: pb.LedgerOffset_LEDGER_END}},
+		Filter:   &pb.TransactionFilter{FiltersByParty: filterMap},
+	}
+	stream, err := transactionServiceClient.GetTransactionTrees(ctx, in)
+	if err != nil {
+		log.Fatalf("Could not get transaction trees stream: %v", err)
+	}
+	for {
+		msg, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			log.Fatalf("%v.GetTransactionTrees(_) = _, %v", transactionServiceClient, err)
+		}
+		log.Println(msg.String())
+		if len(msg.Transactions) == 0 {
+			log.Println("Transaction list is empty")
+			break
+		}
+		eventsById := msg.Transactions[0].GetEventsById()
+		for _, event := range eventsById {
+			if event.GetCreated() != nil {
+				log.Printf("Found a created event")
+			}
+			if event.GetExercised() != nil {
+				log.Printf("Found an exercise event")
+				if event.GetExercised().Choice == "CallOut" {
+					log.Println("Found an exercise of `Callout`")
+					log.Println(event.GetExercised().ChoiceArgument.GetRecord().Fields[0].GetValue().GetText())
+				}
+			}
+		}
+	}
+}
+
+// THE FUNCTION USED IN THE CHOICE OBSERVER DEMO
+
+func getChoiceExerciseMessageAndAnswer(
+	ctx context.Context,
+	transactionServiceClient pb.TransactionServiceClient,
+	commandServiceClient pb.CommandServiceClient,
+	ledgerID string,
+	contractId string) {
+
+	filterMap := map[string]*pb.Filters{*party: {}}
+	// TODO : make Begin a flag
+	getTransactionsRequest := &pb.GetTransactionsRequest{
+		LedgerId: ledgerID,
+		Begin:    &pb.LedgerOffset{Value: &pb.LedgerOffset_Boundary{Boundary: pb.LedgerOffset_LEDGER_END}},
+		Filter:   &pb.TransactionFilter{FiltersByParty: filterMap},
+	}
+	stream, err := transactionServiceClient.GetTransactionTrees(ctx, getTransactionsRequest)
+	if err != nil {
+		log.Fatalf("Could not get transaction trees stream: %v", err)
+	}
+	for {
+		msg, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			log.Fatalf("%v.GetTransactionTrees(_) = _, %v", transactionServiceClient, err)
+		}
+		log.Println(msg.String())
+		if len(msg.Transactions) == 0 {
+			log.Println("Transaction list is empty")
+			break
+		}
+		eventsById := msg.Transactions[0].GetEventsById()
+		for _, event := range eventsById {
+			if event.GetCreated() != nil {
+				log.Printf("Found a created event")
+			}
+			if event.GetExercised() != nil {
+				log.Printf("Found an exercise event")
+				if event.GetExercised().Choice == *call_out_choice_name {
+					log.Printf("Found an exercise of %v", *call_out_choice_name)
+					message := event.GetExercised().ChoiceArgument.GetRecord().Fields[0].GetValue().GetText()
+					log.Printf("The incoming message is: %v\n", message)
+					var command_id = uuid.New().String()
+					cid, err := submitExerciseAndGetContractId2(
+						ctx,                    // ctx context.Context,
+						commandServiceClient,   //commandClient pb.CommandServiceClient,
+						ledgerID,               //ledgerID string,
+						*workflow_id,           //workflowID string,
+						*package_id,            //packageID string,
+						*module_name,           //moduleName string,
+						*template_name,         //templateName string,
+						contractId,             // contractId string,
+						*call_back_choice_name, //choice string,
+						optinalSomeTextInput(*call_back_input_field, *call_back_input_text), //input *pb.Value, //integerInput | variantInput | partyInput
+						*party,          //submittingParty string,
+						*application_id, //applicationID string,
+						command_id)      //commandID string)
+					if err != nil {
+						log.Fatalf("Error %v", err)
+					}
+					if err == nil {
+						log.Printf("Answer submitted, cid: %v\n", cid)
+					}
+
+				}
+			}
+		}
+	}
+}
+
+var (
+	addr                  = flag.String("addr", "localhost:6865", "Ledger address")
+	party                 = flag.String("party", "Alice", "Ledger party on behalf of the app runs")
+	access_token          = flag.String("access_token", "", "Access token of the party on behalf of the app runs")
+	ca_file               = flag.String("ca_file", "", "The file containing the CA root cert file")
+	tls                   = flag.Bool("tls", false, "Connection uses TLS if true, else plain TCP")
+	application_id        = flag.String("application_id", "damlhub", "Application id, default `damlhub")
+	workflow_id           = flag.String("workflow_id", "choice_observer_demo_workflow", "Workflow id")
+	package_id            = flag.String("package_id", "", "Package id of the Daml package")
+	module_name           = flag.String("module_name", "", "Module name in which you want to exercise a choice")
+	template_name         = flag.String("template_name", "", "Template name on which you want to exercise a choice")
+	call_out_choice_name  = flag.String("call_out_choice_name", "", "Choice name used to call out")
+	call_back_choice_name = flag.String("call_back_choice_name", "", "Choice name used to call back")
+	call_back_input_field = flag.String("call_back_input_field", "message", "Input field name, provided that the input consist of one text field")
+	call_back_input_text  = flag.String("call_back_input_text", "Hello World", "Input text, provided that the input consist of one text field")
+)
+
+type AuthToken struct {
+	Token string
+}
+
+func (c AuthToken) GetRequestMetadata(ctx context.Context, uri ...string) (map[string]string, error) {
+	return map[string]string{
+		"Authorization": "Bearer " + c.Token,
+	}, nil
+}
+
+func (c AuthToken) RequireTransportSecurity() bool {
+	return false
+}
+
 func main() {
-	// Set up a connection to the server.
-	cc, err := grpc.Dial(address, grpc.WithInsecure())
+	flag.Parse()
+
+	// SET UP CONNECTION
+
+	var opts []grpc.DialOption
+	if *tls {
+		creds, err := credentials.NewClientTLSFromFile(*ca_file, "")
+		if err != nil {
+			log.Fatalf("Failed to create TLS credentials %v", err)
+		}
+		opts = append(opts, grpc.WithTransportCredentials(creds))
+
+		auth_token := AuthToken{Token: *access_token}
+
+		opts = append(opts, grpc.WithPerRPCCredentials(auth_token))
+	} else {
+		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}
+	var kp = keepalive.ClientParameters{
+		Time:                30 * time.Second,
+		Timeout:             20 * time.Second,
+		PermitWithoutStream: true,
+	}
+	opts = append(opts, grpc.WithKeepaliveParams(kp))
+	conn, err := grpc.Dial(*addr, opts...)
 	if err != nil {
 		log.Fatalf("did not connect: %v", err)
 	}
-	defer cc.Close()
+	defer conn.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// CREATE CONTEXT
+
+	//ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	commandClient := pb.NewCommandServiceClient(cc)
+	log.Println("Connected")
 
-	ledgerID := getLedgerID(ctx, cc)
-	//log.Println("Ledger Id = ", ledgerId)
+	//commandClient := pb.NewCommandServiceClient(cc)
 
-	pkgIDs := getPackageIDs(ctx, cc, ledgerID)
-	packageID := pkgIDs[0]
-	//log.Printf("Active package IDs: %v", pkgIDs)
+	ledgerID := getLedgerID(ctx, conn)
+	log.Println("Ledger Id = ", ledgerID)
 
-	// HERE COME YOUR FUNCTIONS
-	// ...
+	//getChoiceExerciseAndAnswer(ctx, conn, ledgerID)
+
+	// CREATE SERCVICE CLIENTS
+
+	activeContractsServiceClient := pb.NewActiveContractsServiceClient(conn)
+	transactionServiceClient := pb.NewTransactionServiceClient(conn)
+	commandServiceClient := pb.NewCommandServiceClient(conn)
+
+	filterForAsset := map[string]*pb.Filters{
+		*party: {
+			Inclusive: &pb.InclusiveFilters{
+				TemplateIds: []*pb.Identifier{{
+					PackageId:  *package_id,
+					ModuleName: *module_name,
+					EntityName: *template_name,
+				},
+				},
+			},
+		},
+	}
+
+	getActiveContractSetRequest := &pb.GetActiveContractsRequest{
+		LedgerId: ledgerID,
+		Filter:   &pb.TransactionFilter{FiltersByParty: filterForAsset},
+	}
+
+	acl, err := activeContractsServiceClient.GetActiveContracts(ctx, getActiveContractSetRequest)
+
+	if err != nil {
+		log.Printf("Error creating get active contracts clent: %v\n", err)
+	}
+
+	acs, err := acl.Recv()
+
+	if err != nil {
+		log.Printf("Error receiving active contract set: %v\n", err)
+	}
+
+	if len(acs.ActiveContracts) == 0 {
+		log.Println("There are no active Policy contracts on the ledger")
+		return
+	}
+
+	contractId := acs.ActiveContracts[0].ContractId
+
+	log.Println(contractId)
+
+	getChoiceExerciseMessageAndAnswer(
+		ctx,
+		transactionServiceClient,
+		commandServiceClient,
+		ledgerID,
+		contractId,
+	)
+
 }
